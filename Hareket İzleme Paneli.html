@@ -1,0 +1,266 @@
+<div id="panel-root"></div>
+<style>
+  #panel-root {
+    --bg: #0e1416;
+    --panel: #141c1f;
+    --line: #2a3538;
+    --text: #dbe4e6;
+    --dim: #6b7d81;
+    --signal: #5ee6a6;
+    --avg: #5ea6e6;
+    --alert: #ff6b5e;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
+    background: var(--bg);
+    color: var(--text);
+    padding: 20px;
+    border-radius: 4px;
+    max-width: 900px;
+  }
+  #panel-root .head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 14px;
+    margin-bottom: 16px;
+  }
+  #panel-root h1 {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    margin: 0;
+    color: var(--text);
+  }
+  #panel-root .sub {
+    font-size: 11px;
+    color: var(--dim);
+    margin-top: 4px;
+  }
+  #panel-root button {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 7px 14px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  #panel-root button:hover { border-color: var(--dim); }
+  #panel-root button:disabled { opacity: 0.35; cursor: default; }
+  #panel-root .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--line);
+    margin-bottom: 14px;
+    border: 1px solid var(--line);
+  }
+  #panel-root .stat {
+    background: var(--panel);
+    padding: 10px 14px;
+  }
+  #panel-root .stat .label {
+    font-size: 10px;
+    color: var(--dim);
+    margin-bottom: 4px;
+  }
+  #panel-root .stat .value {
+    font-size: 18px;
+    font-variant-numeric: tabular-nums;
+  }
+  #panel-root .stat.motion .value { color: var(--alert); }
+  #panel-root canvas {
+    display: block;
+    width: 100%;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+  }
+  #panel-root .legend {
+    display: flex;
+    gap: 18px;
+    margin-top: 10px;
+    font-size: 11px;
+    color: var(--dim);
+  }
+  #panel-root .legend span { display: flex; align-items: center; gap: 6px; }
+  #panel-root .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  #panel-root .status {
+    font-size: 11px;
+    color: var(--dim);
+  }
+  #panel-root .status.on { color: var(--signal); }
+</style>
+
+<script>
+(function() {
+  const root = document.getElementById('panel-root');
+
+  root.innerHTML = `
+    <div class="head">
+      <div>
+        <h1>DUVAR SENSORU — RSSI IZLEME</h1>
+        <div class="sub">ESP32 alicidan ESP-NOW verisi, Web Serial ile canli</div>
+      </div>
+      <div style="text-align:right">
+        <button id="btnConnect">Porta bagl</button>
+        <div class="status" id="statusText" style="margin-top:8px">bagli degil</div>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat">
+        <div class="label">RSSI</div>
+        <div class="value" id="statRssi">—</div>
+      </div>
+      <div class="stat">
+        <div class="label">ORTALAMA</div>
+        <div class="value" id="statAvg">—</div>
+      </div>
+      <div class="stat">
+        <div class="label">SAPMA</div>
+        <div class="value" id="statStd">—</div>
+      </div>
+      <div class="stat motion">
+        <div class="label">DURUM</div>
+        <div class="value" id="statMotion">sakin</div>
+      </div>
+    </div>
+
+    <canvas id="chart" width="860" height="280"></canvas>
+    <div class="legend">
+      <span><span class="dot" style="background:#5ee6a6"></span>anlik RSSI</span>
+      <span><span class="dot" style="background:#5ea6e6"></span>hareketli ortalama</span>
+      <span><span class="dot" style="background:#ff6b5e"></span>hareket algilandi</span>
+    </div>
+  `;
+
+  const btn = root.querySelector('#btnConnect');
+  const statusText = root.querySelector('#statusText');
+  const statRssi = root.querySelector('#statRssi');
+  const statAvg = root.querySelector('#statAvg');
+  const statStd = root.querySelector('#statStd');
+  const statMotion = root.querySelector('#statMotion');
+  const canvas = root.querySelector('#chart');
+  const ctx = canvas.getContext('2d');
+
+  const MAX_POINTS = 200;
+  let points = []; // {rssi, avg, motion}
+
+  let minRssi = -90, maxRssi = -30;
+
+  function drawChart() {
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    // grid
+    ctx.strokeStyle = '#1f2a2d';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const y = (h / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+    }
+
+    if (points.length < 2) return;
+
+    const range = maxRssi - minRssi || 1;
+    const stepX = w / (MAX_POINTS - 1);
+    const toY = (v) => h - ((v - minRssi) / range) * h;
+
+    // motion background bands
+    ctx.fillStyle = 'rgba(255,107,94,0.10)';
+    points.forEach((p, i) => {
+      if (p.motion) {
+        ctx.fillRect(i * stepX, 0, stepX + 1, h);
+      }
+    });
+
+    // average line
+    ctx.strokeStyle = '#5ea6e6';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    points.forEach((p, i) => {
+      const x = i * stepX, y = toY(p.avg);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // rssi line
+    ctx.strokeStyle = '#5ee6a6';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    points.forEach((p, i) => {
+      const x = i * stepX, y = toY(p.rssi);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  function handleLine(line) {
+    // format: zaman,rssi,ortalama,sapma,hareket
+    const parts = line.trim().split(',');
+    if (parts.length !== 5) return;
+    const [, rssiStr, avgStr, stdStr, motionStr] = parts;
+    const rssi = parseFloat(rssiStr);
+    const avg = parseFloat(avgStr);
+    const std = parseFloat(stdStr);
+    const motion = motionStr === '1';
+    if (Number.isNaN(rssi) || Number.isNaN(avg)) return;
+
+    points.push({ rssi, avg, motion });
+    if (points.length > MAX_POINTS) points.shift();
+
+    minRssi = Math.min(...points.map(p => Math.min(p.rssi, p.avg))) - 3;
+    maxRssi = Math.max(...points.map(p => Math.max(p.rssi, p.avg))) + 3;
+
+    statRssi.textContent = rssi.toFixed(0) + ' dBm';
+    statAvg.textContent = avg.toFixed(1) + ' dBm';
+    statStd.textContent = std.toFixed(2);
+    statMotion.textContent = motion ? 'HAREKET' : 'sakin';
+    statMotion.style.color = motion ? '#ff6b5e' : '#dbe4e6';
+
+    drawChart();
+  }
+
+  async function connect() {
+    if (!('serial' in navigator)) {
+      statusText.textContent = 'Bu tarayici Web Serial desteklemiyor (Chrome/Edge kullanin)';
+      return;
+    }
+    try {
+      const port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+
+      statusText.textContent = 'bagli';
+      statusText.classList.add('on');
+      btn.disabled = true;
+
+      const decoder = new TextDecoderStream();
+      port.readable.pipeTo(decoder.writable);
+      const reader = decoder.readable.getReader();
+
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += value;
+        let idx;
+        while ((idx = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 1);
+          handleLine(line);
+        }
+      }
+    } catch (err) {
+      statusText.textContent = 'hata: ' + err.message;
+    }
+  }
+
+  btn.addEventListener('click', connect);
+  drawChart();
+})();
+</script>
